@@ -1,0 +1,34 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Raw data (too large for git; download from cricsheet.org) ─────────────────
+ipl_json/
+
+# ── Generated cache files ─────────────────────────────────────────────────────
+ipl_project/cache/
+*.parquet
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# ── Jupyter checkpoints ───────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Secrets / env files ───────────────────────────────────────────────────────
+.env
+*.env
