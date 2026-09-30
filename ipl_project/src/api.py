@@ -59,6 +59,28 @@ def get_metadata():
         "venues": sorted([v for v in venues if v])
     }
 
+@app.get("/api/players")
+def get_all_players():
+    """Return the top 300 batters and top 200 bowlers globally."""
+    batters_counts = balls_df.groupby("batter_id")["batter"].first().to_dict()
+    batter_frequencies = balls_df["batter_id"].value_counts().head(300).index.tolist()
+    
+    batters = [{"id": pid, "name": batters_counts[pid]} for pid in batter_frequencies]
+    
+    bowlers_counts = balls_df.groupby("bowler_id")["bowler"].first().to_dict()
+    bowler_frequencies = balls_df["bowler_id"].value_counts().head(200).index.tolist()
+    
+    bowlers = [{"id": pid, "name": bowlers_counts[pid]} for pid in bowler_frequencies]
+    
+    # Sort alphabetically by name
+    batters = sorted(batters, key=lambda x: x["name"])
+    bowlers = sorted(bowlers, key=lambda x: x["name"])
+    
+    return {
+        "batters": batters,
+        "bowlers": bowlers
+    }
+
 @app.get("/api/players/{team}")
 def get_players(team: str):
     """Return the most frequent batters and bowlers for a given team."""

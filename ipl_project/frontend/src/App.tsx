@@ -9,13 +9,19 @@ function App() {
   const [team2, setTeam2] = useState('');
   const [venue, setVenue] = useState('');
   
-  const [team1Players, setTeam1Players] = useState<{batters: any[], bowlers: any[]}>({ batters: [], bowlers: [] });
-  const [team2Players, setTeam2Players] = useState<{batters: any[], bowlers: any[]}>({ batters: [], bowlers: [] });
+  // Store all players globally
+  const [allPlayers, setAllPlayers] = useState<{batters: any[], bowlers: any[]}>({ batters: [], bowlers: [] });
 
   const [t1Batters, setT1Batters] = useState<string[]>([]);
   const [t1Bowlers, setT1Bowlers] = useState<string[]>([]);
   const [t2Batters, setT2Batters] = useState<string[]>([]);
   const [t2Bowlers, setT2Bowlers] = useState<string[]>([]);
+  
+  // Search state for each list
+  const [searchT1Bat, setSearchT1Bat] = useState('');
+  const [searchT1Bowl, setSearchT1Bowl] = useState('');
+  const [searchT2Bat, setSearchT2Bat] = useState('');
+  const [searchT2Bowl, setSearchT2Bowl] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -31,31 +37,19 @@ function App() {
         }
         if (data.venues.length > 0) setVenue(data.venues[0]);
       });
+      
+    // Fetch all global players
+    fetch(`${API_URL}/players`)
+      .then(res => res.json())
+      .then(data => {
+        setAllPlayers(data);
+        // Pre-select some dummy top players just so the user isn't forced to click 34 times immediately
+        setT1Batters(data.batters.slice(0, 11).map((p: any) => p.id));
+        setT1Bowlers(data.bowlers.slice(0, 6).map((p: any) => p.id));
+        setT2Batters(data.batters.slice(11, 22).map((p: any) => p.id));
+        setT2Bowlers(data.bowlers.slice(6, 12).map((p: any) => p.id));
+      });
   }, []);
-
-  useEffect(() => {
-    if (team1) {
-      fetch(`${API_URL}/players/${team1}`)
-        .then(res => res.json())
-        .then(data => {
-          setTeam1Players(data);
-          setT1Batters(data.batters.slice(0, 11).map((p: any) => p.id));
-          setT1Bowlers(data.bowlers.slice(0, 6).map((p: any) => p.id));
-        });
-    }
-  }, [team1]);
-
-  useEffect(() => {
-    if (team2) {
-      fetch(`${API_URL}/players/${team2}`)
-        .then(res => res.json())
-        .then(data => {
-          setTeam2Players(data);
-          setT2Batters(data.batters.slice(0, 11).map((p: any) => p.id));
-          setT2Bowlers(data.bowlers.slice(0, 6).map((p: any) => p.id));
-        });
-    }
-  }, [team2]);
 
   const togglePlayer = (id: string, list: string[], setList: (l: string[]) => void, max: number) => {
     if (list.includes(id)) {
@@ -91,6 +85,19 @@ function App() {
 
   const isReady = t1Batters.length === 11 && t1Bowlers.length >= 5 && t2Batters.length === 11 && t2Bowlers.length >= 5;
 
+  // Helpers to filter players based on search and always show selected players at top
+  const filterPlayers = (players: any[], search: string, selectedIds: string[]) => {
+    let filtered = players.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
+    // Sort so selected players appear at the top
+    return filtered.sort((a, b) => {
+      const aSel = selectedIds.includes(a.id);
+      const bSel = selectedIds.includes(b.id);
+      if (aSel && !bSel) return -1;
+      if (!aSel && bSel) return 1;
+      return 0;
+    });
+  };
+
   return (
     <div className="glass-panel">
       <h1>IPL Match Simulator</h1>
@@ -115,8 +122,15 @@ function App() {
           <div className="grid-2" style={{ marginTop: '1rem' }}>
             <div>
               <label>Batters ({t1Batters.length}/11)</label>
+              <input 
+                type="text" 
+                placeholder="Search batters..." 
+                className="search-input"
+                value={searchT1Bat}
+                onChange={e => setSearchT1Bat(e.target.value)}
+              />
               <div className="player-list">
-                {team1Players.batters.map(p => (
+                {filterPlayers(allPlayers.batters, searchT1Bat, t1Batters).map(p => (
                   <div key={p.id} 
                        className={`player-item ${t1Batters.includes(p.id) ? 'selected' : ''}`}
                        onClick={() => togglePlayer(p.id, t1Batters, setT1Batters, 11)}>
@@ -128,8 +142,15 @@ function App() {
             </div>
             <div>
               <label>Bowlers ({t1Bowlers.length}/6)</label>
+              <input 
+                type="text" 
+                placeholder="Search bowlers..." 
+                className="search-input"
+                value={searchT1Bowl}
+                onChange={e => setSearchT1Bowl(e.target.value)}
+              />
               <div className="player-list">
-                {team1Players.bowlers.map(p => (
+                {filterPlayers(allPlayers.bowlers, searchT1Bowl, t1Bowlers).map(p => (
                   <div key={p.id} 
                        className={`player-item ${t1Bowlers.includes(p.id) ? 'selected' : ''}`}
                        onClick={() => togglePlayer(p.id, t1Bowlers, setT1Bowlers, 6)}>
@@ -152,8 +173,15 @@ function App() {
           <div className="grid-2" style={{ marginTop: '1rem' }}>
             <div>
               <label>Batters ({t2Batters.length}/11)</label>
+              <input 
+                type="text" 
+                placeholder="Search batters..." 
+                className="search-input"
+                value={searchT2Bat}
+                onChange={e => setSearchT2Bat(e.target.value)}
+              />
               <div className="player-list">
-                {team2Players.batters.map(p => (
+                {filterPlayers(allPlayers.batters, searchT2Bat, t2Batters).map(p => (
                   <div key={p.id} 
                        className={`player-item ${t2Batters.includes(p.id) ? 'selected' : ''}`}
                        onClick={() => togglePlayer(p.id, t2Batters, setT2Batters, 11)}>
@@ -165,8 +193,15 @@ function App() {
             </div>
             <div>
               <label>Bowlers ({t2Bowlers.length}/6)</label>
+              <input 
+                type="text" 
+                placeholder="Search bowlers..." 
+                className="search-input"
+                value={searchT2Bowl}
+                onChange={e => setSearchT2Bowl(e.target.value)}
+              />
               <div className="player-list">
-                {team2Players.bowlers.map(p => (
+                {filterPlayers(allPlayers.bowlers, searchT2Bowl, t2Bowlers).map(p => (
                   <div key={p.id} 
                        className={`player-item ${t2Bowlers.includes(p.id) ? 'selected' : ''}`}
                        onClick={() => togglePlayer(p.id, t2Bowlers, setT2Bowlers, 6)}>
