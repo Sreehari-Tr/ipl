@@ -84,11 +84,12 @@ class MatchSimulator:
         outcome = np.random.choice(self.classes, p=probs)
         return outcome
 
-    def simulate_innings(self, batting_lineup: list[str], bowling_lineup: list[str]) -> dict:
+    def simulate_innings(self, batting_lineup: list[str], bowling_lineup: list[str], target: int = None) -> dict:
         """
         Simulate a 20-over innings.
         Batting lineup: list of 11 batter IDs
         Bowling lineup: list of 5-6 bowler IDs
+        target: Optional score to chase. Innings ends if runs >= target.
         """
         runs = 0
         wickets = 0
@@ -105,6 +106,9 @@ class MatchSimulator:
         ball_by_ball_log = []
 
         while legal_balls < 120 and wickets < 10:
+            if target is not None and runs >= target:
+                break
+            
             over_idx = legal_balls // 6
             phase = _get_phase(over_idx)
             
