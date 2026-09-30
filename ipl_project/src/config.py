@@ -25,6 +25,17 @@ POWERPLAY_OVERS         = range(0, 6)    # over indices 0-5  (overs 1-6)
 MIDDLE_OVERS            = range(6, 15)   # over indices 6-14 (overs 7-15)
 DEATH_OVERS             = range(15, 20)  # over indices 15-19 (overs 16-20)
 
+# ── Dismissal kinds ───────────────────────────────────────────────────────────
+# Dismissals that count as a WICKET FOR THE BOWLER.
+BOWLER_WICKET_KINDS: frozenset[str] = frozenset({
+    "bowled", "caught", "caught and bowled", "lbw", "stumped", "hit wicket",
+})
+
+# "Wickets" in the data that are not real dismissals (batter can return).
+NOT_A_DISMISSAL_KINDS: frozenset[str] = frozenset({
+    "retired hurt", "retired not out",
+})
+
 # ── Shrinkage / recency hyper-parameters ─────────────────────────────────────
 # k controls the pull toward the league average.
 # If a batter has faced fewer than k balls, predictions lean heavily on the
@@ -110,8 +121,12 @@ VENUE_NAME_MAP: dict[str, str] = {
     "Narendra Modi Stadium"                     : "Narendra Modi Stadium",
     "Sardar Patel Stadium"                      : "Narendra Modi Stadium",
     # Ekana
-    "BRSABV Ekana Cricket Stadium"              : "Ekana Cricket Stadium",
-    "Ekana Cricket Stadium"                     : "Ekana Cricket Stadium",
+    "BRSABV Ekana Cricket Stadium"                          : "Ekana Cricket Stadium",
+    "Ekana Cricket Stadium"                                : "Ekana Cricket Stadium",
+    "Bharat Ratna Shri Atal Bihari Vajpayee Ekana Cricket Stadium": "Ekana Cricket Stadium",
+    # Maharashtra CA
+    "Maharashtra Cricket Association Stadium"              : "Maharashtra Cricket Association Stadium",
+    "Maharashtra Cricket Association Stadium, Pune"        : "Maharashtra Cricket Association Stadium",
 }
 
 # ── Bowling type heuristics ───────────────────────────────────────────────────
