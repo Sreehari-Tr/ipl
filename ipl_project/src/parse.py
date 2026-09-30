@@ -1,460 +1,326 @@
+# Stage 2 – parse.py  (coming next)
+# JSON → ball-by-ball table and match-level table, cached as parquet.
 """
-parse.py
-========
-Converts raw Cricsheet JSON match dicts into three tidy tables:
+parse.py - Stage 2: turn raw Cricsheet JSON files into three clean tables.
 
-    match_row  – dict  – one row for matches.parquet
-    balls      – list[dict] – one row per delivery for balls.parquet
-    lineups    – list[dict] – one row per player per match for lineups.parquet
+    balls.csv    one row per delivery   (what happened on every ball)
+    matches.csv  one row per match      (teams, venue, toss, result, scores)
+    lineups.csv  one row per player per match (who played for whom)
 
-Public API
-----------
-    parse_match_dict(data, match_id) -> tuple | None
-    parse_all(data_dir, ...)         -> (matches_df, balls_df, lineups_df)
+How to run (from the project folder):
+    python -m src.parse
 
-If a match has no innings (abandoned before a ball was bowled) the function
-returns None and the caller should skip it.
+The code is split into small functions, each doing one job:
+
+    normalise_team / normalise_venue   fix names
+    get_phase                          powerplay / middle / death
+    parse_delivery                     one ball  -> one row
+    parse_innings                      one innings -> many rows
+    parse_match_dict                   one match -> (match row, ball rows, lineup rows)
+    parse_all_matches                  every file -> three DataFrames
+    save_tables / load_tables          write and read the CSV files
 """
-
-from __future__ import annotations
-
 import json
-import logging
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 
-from src.config import (
-    BALL_TABLE_PATH,
-    BOWLER_WICKET_KINDS,
-    DATA_DIR,
-    DEATH_OVERS,
-    MATCH_TABLE_PATH,
-    MIDDLE_OVERS,
-    NOT_A_DISMISSAL_KINDS,
-    POWERPLAY_OVERS,
-    TEAM_NAME_MAP,
-    VENUE_NAME_MAP,
-)
-
-log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants local to the parser
-# ---------------------------------------------------------------------------
-# Extras that are NOT charged to the bowler (byes & leg-byes)
-_BYES_KINDS = {"byes", "legbyes"}
-
-# Extras that make the delivery a no-ball (batter faces it, not a legal ball)
-_NOBALL_KINDS = {"noballs"}
-
-# Extras that make the delivery a wide (batter does NOT face it, not legal)
-_WIDE_KINDS = {"wides"}
+from src import config
 
 
-# ---------------------------------------------------------------------------
-# Name-normalisation helpers
-# ---------------------------------------------------------------------------
-
-def _norm_team(name: str) -> str:
-    """Return the canonical franchise name, or the name unchanged if unknown."""
-    return TEAM_NAME_MAP.get(name, name)
-
-
-def _norm_venue(raw: str) -> str:
-    """
-    Strip everything after the first comma, then look up in VENUE_NAME_MAP.
-    If not found, return the stripped name as-is (so new venues are still usable).
-    """
-    short = raw.split(",")[0].strip()
-    return VENUE_NAME_MAP.get(raw, VENUE_NAME_MAP.get(short, short))
+# ===========================================================================
+# 1. Small helper functions
+# ===========================================================================
+def normalise_team(name: str) -> str:
+    """Give renamed franchises one consistent name."""
+    return config.TEAM_NAME_MAP.get(name, name)
 
 
-# ---------------------------------------------------------------------------
-# Phase helper
-# ---------------------------------------------------------------------------
+def normalise_venue(raw_name: str) -> str:
+    """'Wankhede Stadium, Mumbai' -> 'Wankhede Stadium' (plus rename fixes)."""
+    base_name = raw_name.split(",")[0].strip()
+    return config.VENUE_NAME_MAP.get(base_name, base_name)
 
-def _phase(over_index: int) -> str:
-    if over_index in POWERPLAY_OVERS:
+
+def get_phase(over_index: int) -> str:
+    """Which phase of a T20 innings is this over? (over_index starts at 0)."""
+    if over_index <= config.POWERPLAY_LAST_OVER:
         return "powerplay"
-    if over_index in MIDDLE_OVERS:
+    if over_index <= config.MIDDLE_LAST_OVER:
         return "middle"
     return "death"
 
 
-# ---------------------------------------------------------------------------
-# Delivery parser
-# ---------------------------------------------------------------------------
-
-def _parse_delivery(
-    delivery: dict,
-    *,
-    match_id: str,
-    innings_no: int,
-    batting_team: str,
-    bowling_team: str,
-    over_index: int,
-    delivery_in_over: int,
-    registry: dict[str, str],
-) -> dict:
+# ===========================================================================
+# 2. One delivery -> one row
+# ===========================================================================
+def parse_delivery(delivery: dict, context: dict) -> dict:
     """
-    Turn one Cricsheet delivery dict into a flat row dict.
+    Convert one ball from the JSON into a flat dictionary (one table row).
 
-    Cricket rules implemented here
-    --------------------------------
-    1. Wides  -> not a legal ball, batter does NOT face it.
-    2. No-balls -> not a legal ball, but batter DOES face it.
-    3. Byes / leg-byes -> not charged to the batter OR the bowler.
-    4. Bowler wickets: only bowled / caught / c&b / lbw / stumped / hit wicket.
-    5. "retired hurt" / "retired not out" are NOT dismissals.
+    `context` carries information that is the same for many balls:
+    match_id, innings_no, over, delivery_in_over, batting_team,
+    bowling_team and name_to_id (player name -> unique ID).
+
+    Cricket rules handled here:
+      * WIDE      : not a legal ball, batter did NOT face it.
+      * NO-BALL   : not a legal ball, but the batter DID face it.
+      * BYES/LEG-BYES : count for the team, but NOT as batter runs and
+                        NOT against the bowler.
+      * RUN OUT / RETIRED : not a wicket for the bowler.
     """
-    extras: dict[str, int] = delivery.get("extras", {})
-    runs_info: dict = delivery["runs"]
+    name_to_id = context["name_to_id"]
+    extras = delivery.get("extras", {})
+    wides = extras.get("wides", 0)
+    noballs = extras.get("noballs", 0)
 
-    batter = delivery["batter"]
-    bowler = delivery["bowler"]
+    is_wide = wides > 0
+    is_noball = noballs > 0
+    runs_batter = delivery["runs"]["batter"]
 
-    # -- Is it a wide? --
-    is_wide = bool(extras.get("wides", 0))
+    # --- wicket information (we keep the first wicket if there are two) ---
+    wickets = delivery.get("wickets", [])
+    wicket = wickets[0] if wickets else None
+    wicket_kind = wicket["kind"] if wicket else None
+    is_dismissal = wicket is not None and wicket_kind not in config.NOT_A_DISMISSAL_KINDS
+    is_bowler_wicket = is_dismissal and wicket_kind in config.BOWLER_WICKET_KINDS
+    player_out = wicket["player_out"] if wicket else None
 
-    # -- Is it a no-ball? --
-    is_noball = bool(extras.get("noballs", 0))
-
-    # -- Legal ball / ball faced --
-    is_legal_ball = not (is_wide or is_noball)
-    is_ball_faced = not is_wide  # wide: batter didn't face; no-ball: they did
-
-    # -- Runs --
-    runs_batter: int = runs_info["batter"]
-
-    # Extras breakdown
-    runs_wides    = extras.get("wides", 0)
-    runs_noballs  = extras.get("noballs", 0)
-    runs_byes     = extras.get("byes", 0)
-    runs_legbyes  = extras.get("legbyes", 0)
-    runs_penalty  = extras.get("penalty", 0)
-
-    # Runs attributed to the bowler:
-    #   batter runs + wide penalty + noball penalty
-    #   but NOT byes or leg-byes (those are fielding errors)
-    runs_bowler = runs_batter + runs_wides + runs_noballs
-
-    runs_total: int = runs_info["total"]
-
-    # -- Wicket handling --
-    raw_wickets: list[dict] = delivery.get("wickets", [])
-    # A ball can have >1 entry (e.g. run-out + the actual wicket) but we only
-    # care about the first real dismissal for the batting side.
-    dismissal_kind = None
-    player_out = None
-    for w in raw_wickets:
-        kind = w.get("kind", "")
-        if kind not in NOT_A_DISMISSAL_KINDS:
-            dismissal_kind = kind
-            player_out = w.get("player_out")
-            break
-
-    is_dismissal = dismissal_kind is not None
-    is_bowler_wicket = dismissal_kind in BOWLER_WICKET_KINDS if is_dismissal else False
-
-    player_out_id = registry.get(player_out) if player_out else None
+    batter, bowler, non_striker = (
+        delivery["batter"], delivery["bowler"], delivery["non_striker"],
+    )
 
     return {
-        "match_id":          match_id,
-        "innings_no":        innings_no,
-        "batting_team":      batting_team,
-        "bowling_team":      bowling_team,
-        "over":              over_index,
-        "delivery_in_over":  delivery_in_over,
-        "phase":             _phase(over_index),
-        "batter":            batter,
-        "batter_id":         registry.get(batter),
-        "bowler":            bowler,
-        "bowler_id":         registry.get(bowler),
-        "non_striker":       delivery.get("non_striker"),
-        "runs_batter":       runs_batter,
-        "runs_bowler":       runs_bowler,
-        "runs_extras":       runs_total - runs_batter,
-        "runs_total":        runs_total,
-        "runs_wides":        runs_wides,
-        "runs_noballs":      runs_noballs,
-        "runs_byes":         runs_byes,
-        "runs_legbyes":      runs_legbyes,
-        "runs_penalty":      runs_penalty,
-        "is_wide":           is_wide,
-        "is_noball":         is_noball,
-        "is_legal_ball":     is_legal_ball,
-        "is_ball_faced":     is_ball_faced,
-        "is_dismissal":      is_dismissal,
-        "is_bowler_wicket":  is_bowler_wicket,
-        "dismissal_kind":    dismissal_kind,
-        "player_out":        player_out,
-        "player_out_id":     player_out_id,
+        # -- where in the match --
+        "match_id": context["match_id"],
+        "innings_no": context["innings_no"],
+        "over": context["over"],                      # 0 = first over
+        "delivery_in_over": context["delivery_in_over"],  # 1, 2, 3 ... (wides included)
+        "phase": get_phase(context["over"]),
+        "batting_team": context["batting_team"],
+        "bowling_team": context["bowling_team"],
+        # -- who --
+        "batter": batter,
+        "batter_id": name_to_id.get(batter),
+        "bowler": bowler,
+        "bowler_id": name_to_id.get(bowler),
+        "non_striker_id": name_to_id.get(non_striker),
+        # -- runs --
+        "runs_batter": runs_batter,
+        "runs_extras": delivery["runs"]["extras"],
+        "runs_total": delivery["runs"]["total"],
+        # runs charged to the bowler = bat runs + wides + no-balls
+        "runs_bowler": runs_batter + wides + noballs,
+        # -- ball type --
+        "is_wide": is_wide,
+        "is_noball": is_noball,
+        "is_legal_ball": not (is_wide or is_noball),   # counts toward the 6 in an over
+        "is_ball_faced": not is_wide,                  # counts as a ball faced by the batter
+        # -- wicket --
+        "is_dismissal": is_dismissal,
+        "is_bowler_wicket": is_bowler_wicket,
+        "wicket_kind": wicket_kind,
+        "player_out": player_out,
+        "player_out_id": name_to_id.get(player_out) if player_out else None,
     }
 
 
-# ---------------------------------------------------------------------------
-# Innings parser
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 3. One innings -> many rows
+# ===========================================================================
+def parse_innings(innings: dict, innings_no: int, match_id: str,
+                  team_names: list, name_to_id: dict) -> list:
+    """Walk through every over and delivery of one innings."""
+    batting_team = normalise_team(innings["team"])
+    # the bowling team is simply "the other team"
+    bowling_team = next(t for t in team_names if t != batting_team)
 
-def _parse_innings(
-    innings_data: dict,
-    *,
-    match_id: str,
-    innings_no: int,
-    opposing_team: str,
-    registry: dict[str, str],
-) -> list[dict]:
-    """Parse all deliveries in one innings into a list of row dicts."""
-    batting_team = _norm_team(innings_data.get("team", ""))
-    bowling_team = _norm_team(opposing_team)
-
-    rows: list[dict] = []
-    for over_data in innings_data.get("overs", []):
-        over_index: int = over_data["over"]
-        delivery_counter = 0
-
-        for delivery in over_data.get("deliveries", []):
-            delivery_counter += 1
-
-            row = _parse_delivery(
-                delivery,
-                match_id=match_id,
-                innings_no=innings_no,
-                batting_team=batting_team,
-                bowling_team=bowling_team,
-                over_index=over_index,
-                delivery_in_over=delivery_counter,
-                registry=registry,
-            )
-            rows.append(row)
-
+    rows = []
+    for over in innings["overs"]:
+        for position, delivery in enumerate(over["deliveries"], start=1):
+            context = {
+                "match_id": match_id,
+                "innings_no": innings_no,
+                "over": over["over"],
+                "delivery_in_over": position,
+                "batting_team": batting_team,
+                "bowling_team": bowling_team,
+                "name_to_id": name_to_id,
+            }
+            rows.append(parse_delivery(delivery, context))
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Match-level parser
-# ---------------------------------------------------------------------------
-
-def parse_match_dict(
-    data: dict[str, Any],
-    match_id: str,
-) -> tuple[dict, list[dict], list[dict]] | None:
-    """
-    Parse one Cricsheet match dict.
-
-    Returns
-    -------
-    (match_row, balls, lineups)  or  None if the match had no innings.
-
-    match_row : dict
-        Flat dict suitable for a matches table.
-    balls : list[dict]
-        One dict per delivery (super overs excluded).
-    lineups : list[dict]
-        One dict per player per team in this match.
-    """
-    info: dict = data.get("info", {})
-    innings_list: list[dict] = data.get("innings", [])
-
-    # Skip matches that never started
-    if not innings_list:
-        return None
-
-    # Also skip if the only innings is a super over
-    playable = [i for i in innings_list if not i.get("super_over")]
-    if not playable:
-        return None
-
-    registry: dict[str, str] = info.get("registry", {}).get("people", {})
-
-    # -- Teams --
-    raw_teams: list[str] = info.get("teams", [])
-    team1 = _norm_team(raw_teams[0]) if len(raw_teams) > 0 else ""
-    team2 = _norm_team(raw_teams[1]) if len(raw_teams) > 1 else ""
-
-    # -- Venue --
-    venue = _norm_venue(info.get("venue", ""))
-
-    # -- Date / season --
-    dates = info.get("dates", [])
-    date_str = dates[0] if dates else ""
-    season = int(date_str[:4]) if date_str else None
-
-    # -- Toss --
-    toss = info.get("toss", {})
-    toss_winner   = _norm_team(toss.get("winner", ""))
-    toss_decision = toss.get("decision", "")
-
-    # -- Outcome --
-    outcome: dict = info.get("outcome", {})
-    raw_winner = outcome.get("winner", "")
-    winner = _norm_team(raw_winner) if raw_winner else None
-
-    by: dict = outcome.get("by", {})
-    win_by_runs    = by.get("runs")
-    win_by_wickets = by.get("wickets")
-
-    result_text = outcome.get("result", "")
-    if result_text == "no result":
+# ===========================================================================
+# 4. One match -> match row + ball rows + lineup rows
+# ===========================================================================
+def _read_outcome(outcome: dict) -> dict:
+    """Work out who won and how, including ties and no-results."""
+    if outcome.get("result") == "tie":
+        result_type = "tie"            # decided by a super over
+        winner = outcome.get("eliminator")
+    elif outcome.get("winner"):
+        result_type = "normal"
+        winner = outcome["winner"]
+    else:
         result_type = "no_result"
         winner = None
-    elif result_text == "tie":
-        result_type = "tie"
-        # In a tie decided by eliminator/super over, outcome may still name a winner
-        winner = _norm_team(outcome.get("eliminator", "")) or winner
-    elif winner:
-        result_type = "winner"
-    else:
-        result_type = "unknown"
-
-    # -- Parse each innings (skip super overs) --
-    all_balls: list[dict] = []
-    innings_runs: list[int] = []
-    target: int | None = None
-
-    for idx, inn in enumerate(innings_list, start=1):
-        if inn.get("super_over"):
-            continue  # exclude super-over deliveries from stats
-
-        # Determine the opposing team (the other team from the two teams list)
-        batting_team_raw = inn.get("team", "")
-        if batting_team_raw == raw_teams[0]:
-            opposing = raw_teams[1] if len(raw_teams) > 1 else ""
-        else:
-            opposing = raw_teams[0]
-
-        balls = _parse_innings(
-            inn,
-            match_id=match_id,
-            innings_no=idx,
-            opposing_team=opposing,
-            registry=registry,
-        )
-        all_balls.extend(balls)
-        innings_runs.append(sum(b["runs_total"] for b in balls))
-
-        # Target is recorded in the second innings
-        if "target" in inn:
-            target = inn["target"].get("runs")
-
-    first_innings_runs  = innings_runs[0] if len(innings_runs) > 0 else None
-    second_innings_runs = innings_runs[1] if len(innings_runs) > 1 else None
-
-    # -- Lineups --
-    lineups: list[dict] = []
-    players_map: dict[str, list[str]] = info.get("players", {})
-    for team_raw, player_names in players_map.items():
-        team_norm = _norm_team(team_raw)
-        for name in player_names:
-            lineups.append({
-                "match_id":  match_id,
-                "team":      team_norm,
-                "player":    name,
-                "player_id": registry.get(name),
-            })
-
-    # -- Match row --
-    match_row = {
-        "match_id":            match_id,
-        "date":                date_str,
-        "season":              season,
-        "venue":               venue,
-        "team1":               team1,
-        "team2":               team2,
-        "toss_winner":         toss_winner,
-        "toss_decision":       toss_decision,
-        "winner":              winner,
-        "win_by_runs":         win_by_runs,
-        "win_by_wickets":      win_by_wickets,
-        "result_type":         result_type,
-        "first_innings_runs":  first_innings_runs,
-        "second_innings_runs": second_innings_runs,
-        "target":              target,
+    by = outcome.get("by", {})
+    return {
+        "winner": normalise_team(winner) if winner else None,
+        "result_type": result_type,
+        "win_by_runs": by.get("runs"),
+        "win_by_wickets": by.get("wickets"),
+        "dls_method": outcome.get("method"),   # 'D/L' if rain rules were used
     }
 
-    return match_row, all_balls, lineups
 
-
-# ---------------------------------------------------------------------------
-# Batch parser: process the whole data directory
-# ---------------------------------------------------------------------------
-
-def parse_all(
-    data_dir: Path | None = None,
-    save: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def parse_match_dict(data: dict, match_id: str):
     """
-    Walk *data_dir* (default: DATA_DIR from config), parse every *.json file,
-    and return three DataFrames.  Optionally saves them as parquet files.
+    Turn one loaded JSON file into (match_row, ball_rows, lineup_rows).
+    Returns None if the match had no innings at all (abandoned).
     """
-    data_dir = data_dir or DATA_DIR
+    if not data.get("innings"):
+        return None
 
-    match_rows:  list[dict] = []
-    ball_rows:   list[dict] = []
-    lineup_rows: list[dict] = []
+    info = data["info"]
+    name_to_id = info.get("registry", {}).get("people", {})
+    team_names = [normalise_team(t) for t in info["teams"]]
 
-    json_files = sorted(data_dir.glob("*.json"))
+    # ---- ball table ------------------------------------------------------
+    ball_rows = []
+    for innings_no, innings in enumerate(data["innings"], start=1):
+        if innings.get("super_over"):
+            continue  # tie-breaker overs are not part of normal batting stats
+        ball_rows += parse_innings(innings, innings_no, match_id, team_names, name_to_id)
+
+    # ---- innings totals (sum of every ball's total runs) -----------------
+    def total_for(innings_no: int):
+        totals = [r["runs_total"] for r in ball_rows if r["innings_no"] == innings_no]
+        return sum(totals) if totals else None
+
+    first_innings = data["innings"][0]
+    second_target = None
+    if len(data["innings"]) > 1:
+        second_target = data["innings"][1].get("target", {}).get("runs")
+
+    # ---- match table -----------------------------------------------------
+    date = info["dates"][0]
+    event = info.get("event", {})
+    toss = info.get("toss", {})
+    match_row = {
+        "match_id": match_id,
+        "date": date,
+        "season": int(date[:4]),                       # year of the match
+        "match_number": event.get("match_number") or event.get("stage"),
+        "venue": normalise_venue(info.get("venue", "Unknown")),
+        "city": info.get("city"),
+        "team1": team_names[0],
+        "team2": team_names[1],
+        "toss_winner": normalise_team(toss["winner"]) if toss else None,
+        "toss_decision": toss.get("decision"),         # 'bat' or 'field'
+        "first_bat_team": normalise_team(first_innings["team"]),
+        "first_innings_runs": total_for(1),
+        "second_innings_runs": total_for(2),
+        "target": second_target,
+        "overs_per_side": info.get("overs", 20),       # less than 20 if rain-shortened
+        "player_of_match": (info.get("player_of_match") or [None])[0],
+        **_read_outcome(info.get("outcome", {})),
+    }
+
+    # ---- lineup table (the playing XI of each team) ----------------------
+    lineup_rows = []
+    for team, players in info.get("players", {}).items():
+        for player_name in players:
+            lineup_rows.append({
+                "match_id": match_id,
+                "team": normalise_team(team),
+                "player": player_name,
+                "player_id": name_to_id.get(player_name),
+            })
+
+    return match_row, ball_rows, lineup_rows
+
+
+# ===========================================================================
+# 5. All files -> three tables
+# ===========================================================================
+def parse_all_matches(raw_dir: Path = config.RAW_DATA_DIR):
+    """Read every *.json file in `raw_dir` and build the three tables."""
+    match_rows, ball_rows, lineup_rows, skipped = [], [], [], []
+
+    json_files = sorted(Path(raw_dir).glob("*.json"))
     if not json_files:
-        log.warning("No JSON files found in %s", data_dir)
+        raise FileNotFoundError(f"No .json files found in {raw_dir}. "
+                                "Unzip the Cricsheet IPL download into that folder.")
 
-    skipped = 0
     for path in json_files:
-        match_id = path.stem
         try:
-            with path.open(encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception as exc:
-            log.error("Could not read %s: %s", path, exc)
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            parsed = parse_match_dict(data, match_id=path.stem)
+        except (json.JSONDecodeError, KeyError) as error:
+            skipped.append((path.name, repr(error)))
             continue
-
-        result = parse_match_dict(data, match_id)
-        if result is None:
-            skipped += 1
+        if parsed is None:
+            skipped.append((path.name, "no innings (abandoned)"))
             continue
-
-        match_row, balls, lineups = result
+        match_row, balls, lineups = parsed
         match_rows.append(match_row)
-        ball_rows.extend(balls)
-        lineup_rows.extend(lineups)
+        ball_rows += balls
+        lineup_rows += lineups
 
-    matches_df = pd.DataFrame(match_rows)
-    balls_df   = pd.DataFrame(ball_rows)
-    lineups_df = pd.DataFrame(lineup_rows)
+    matches = pd.DataFrame(match_rows)
+    matches["date"] = pd.to_datetime(matches["date"])
+    matches = matches.sort_values(["date", "match_id"]).reset_index(drop=True)
+    balls = pd.DataFrame(ball_rows)
+    lineups = pd.DataFrame(lineup_rows)
 
-    # -- Summary --
-    print(f"\n{'='*60}")
-    print(f"Matches parsed  : {len(matches_df):>6}")
-    print(f"Matches skipped : {skipped:>6}  (no innings)")
-    print(f"Deliveries      : {len(balls_df):>6}")
-    print(f"Lineup entries  : {len(lineups_df):>6}")
-    if len(matches_df):
-        print("\nTeams:")
-        teams = pd.concat([matches_df["team1"], matches_df["team2"]]).value_counts()
-        for t, c in teams.items():
-            print(f"  {t:<45} {c:>4}")
-        print("\nVenues (top 15):")
-        for v, c in matches_df["venue"].value_counts().head(15).items():
-            print(f"  {v:<50} {c:>4}")
-        missing_ids = balls_df["batter_id"].isna().sum() + balls_df["bowler_id"].isna().sum()
-        print(f"\nMissing player IDs in balls table: {missing_ids}")
-    print("="*60)
-
-    if save:
-        BALL_TABLE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        balls_df.to_parquet(BALL_TABLE_PATH, index=False)
-        matches_df.to_parquet(MATCH_TABLE_PATH, index=False)
-        print(f"Saved -> {BALL_TABLE_PATH}")
-        print(f"Saved -> {MATCH_TABLE_PATH}")
-
-    return matches_df, balls_df, lineups_df
+    if skipped:
+        print(f"Skipped {len(skipped)} file(s):")
+        for name, reason in skipped:
+            print(f"   {name}: {reason}")
+    return matches, balls, lineups
 
 
-# ---------------------------------------------------------------------------
-# Entry point: python -m src.parse
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 6. Save, load, summarise
+# ===========================================================================
+def save_tables(matches, balls, lineups) -> None:
+    config.PROCESSED_DIR.mkdir(exist_ok=True)
+    matches.to_csv(config.MATCHES_FILE, index=False)
+    balls.to_csv(config.BALLS_FILE, index=False)
+    lineups.to_csv(config.LINEUPS_FILE, index=False)
+
+
+def load_tables():
+    """Read the saved tables back (fast, no need to re-parse the JSON)."""
+    matches = pd.read_csv(config.MATCHES_FILE, parse_dates=["date"])
+    balls = pd.read_csv(config.BALLS_FILE)
+    lineups = pd.read_csv(config.LINEUPS_FILE)
+    return matches, balls, lineups
+
+
+def print_summary(matches, balls, lineups) -> None:
+    """A quick health check so you can see the parse worked."""
+    print("\n=== PARSE SUMMARY ===")
+    print(f"Matches : {len(matches)}  ({matches.season.min()} to {matches.season.max()})")
+    print(f"Balls   : {len(balls):,}")
+    print(f"Players : {balls.batter_id.nunique()} unique batters, "
+          f"{balls.bowler_id.nunique()} unique bowlers")
+    print(f"Balls with a missing player ID: "
+          f"{int(balls.batter_id.isna().sum() + balls.bowler_id.isna().sum())}")
+    print("\nResult types:")
+    print(matches.result_type.value_counts().to_string())
+    print("\nMatches per season:")
+    print(matches.season.value_counts().sort_index().to_string())
+    print("\nTeams:", sorted(set(matches.team1) | set(matches.team2)))
+    print("\nTop venues (check for duplicate spellings!):")
+    print(matches.venue.value_counts().head(15).to_string())
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    parse_all()
+    matches, balls, lineups = parse_all_matches()
+    save_tables(matches, balls, lineups)
+    print_summary(matches, balls, lineups)
+    print(f"\nSaved tables to: {config.PROCESSED_DIR}")
