@@ -236,6 +236,125 @@ function App() {
               <div className="prob-value">{result.team2_win_prob}%</div>
             </div>
           </div>
+          
+          {result.sample_match && (
+            <div className="scorecard-container">
+              <h3 className="section-title" style={{marginTop: '3rem'}}>Sample Match Scorecard</h3>
+              <p style={{color: '#94a3b8', marginBottom: '2rem'}}>
+                Here is exactly how one of the simulations played out: <br/>
+                <strong>{team1}:</strong> {result.sample_match.inn1_runs}/{result.sample_match.inn1_wickets} (20.0 overs) <br/>
+                <strong>{team2}:</strong> {result.sample_match.inn2_runs}/{result.sample_match.inn2_wickets} ({result.sample_match.inn2_overs}.{result.sample_match.inn2_balls} overs)
+              </p>
+              
+              <div className="grid-2">
+                {/* INNINGS 1 */}
+                <div className="innings-card glass-panel">
+                  <h4>{team1} Innings</h4>
+                  <table className="scorecard-table">
+                    <thead>
+                      <tr>
+                        <th style={{textAlign: 'left'}}>Batter</th>
+                        <th>R</th>
+                        <th>B</th>
+                        <th>4s</th>
+                        <th>6s</th>
+                        <th>SR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.sample_match.inn1_scorecard.batting.map((b: any, i: number) => (
+                        <tr key={i} className={b.out ? 'out' : 'not-out'}>
+                          <td style={{textAlign: 'left'}}>{b.name} {b.out ? '' : '*'}</td>
+                          <td><strong>{b.runs}</strong></td>
+                          <td>{b.balls}</td>
+                          <td>{b.fours}</td>
+                          <td>{b.sixes}</td>
+                          <td>{b.balls > 0 ? ((b.runs / b.balls) * 100).toFixed(1) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  
+                  <h5 style={{textAlign: 'left', marginTop: '1rem', color: '#a5b4fc'}}>Bowling</h5>
+                  <table className="scorecard-table">
+                    <thead>
+                      <tr>
+                        <th style={{textAlign: 'left'}}>Bowler</th>
+                        <th>O</th>
+                        <th>R</th>
+                        <th>W</th>
+                        <th>Econ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.sample_match.inn1_scorecard.bowling.map((b: any, i: number) => (
+                        <tr key={i}>
+                          <td style={{textAlign: 'left'}}>{b.name}</td>
+                          <td>{b.overs}</td>
+                          <td>{b.runs}</td>
+                          <td><strong>{b.wickets}</strong></td>
+                          <td>{b.balls > 0 ? ((b.runs / b.balls) * 6).toFixed(1) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* INNINGS 2 */}
+                <div className="innings-card glass-panel">
+                  <h4>{team2} Innings</h4>
+                  <table className="scorecard-table">
+                    <thead>
+                      <tr>
+                        <th style={{textAlign: 'left'}}>Batter</th>
+                        <th>R</th>
+                        <th>B</th>
+                        <th>4s</th>
+                        <th>6s</th>
+                        <th>SR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.sample_match.inn2_scorecard.batting.map((b: any, i: number) => (
+                        <tr key={i} className={b.out ? 'out' : 'not-out'}>
+                          <td style={{textAlign: 'left'}}>{b.name} {b.out ? '' : '*'}</td>
+                          <td><strong>{b.runs}</strong></td>
+                          <td>{b.balls}</td>
+                          <td>{b.fours}</td>
+                          <td>{b.sixes}</td>
+                          <td>{b.balls > 0 ? ((b.runs / b.balls) * 100).toFixed(1) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  
+                  <h5 style={{textAlign: 'left', marginTop: '1rem', color: '#a5b4fc'}}>Bowling</h5>
+                  <table className="scorecard-table">
+                    <thead>
+                      <tr>
+                        <th style={{textAlign: 'left'}}>Bowler</th>
+                        <th>O</th>
+                        <th>R</th>
+                        <th>W</th>
+                        <th>Econ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.sample_match.inn2_scorecard.bowling.map((b: any, i: number) => (
+                        <tr key={i}>
+                          <td style={{textAlign: 'left'}}>{b.name}</td>
+                          <td>{b.overs}</td>
+                          <td>{b.runs}</td>
+                          <td><strong>{b.wickets}</strong></td>
+                          <td>{b.balls > 0 ? ((b.runs / b.balls) * 6).toFixed(1) : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

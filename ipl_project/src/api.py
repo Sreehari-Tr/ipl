@@ -37,16 +37,24 @@ matches_df = None
 bat_df = None
 bowl_df = None
 sim = None
+player_names = {}
 
 @app.on_event("startup")
 def load_data():
-    global balls_df, matches_df, bat_df, bowl_df, sim
+    global balls_df, matches_df, bat_df, bowl_df, sim, player_names
     log.info("Loading models and tables into memory...")
     balls_df = pd.read_parquet(BALL_TABLE_PATH)
     matches_df = pd.read_parquet(MATCH_TABLE_PATH)
     model, classes = load_model()
     bat_df, bowl_df = load_features()
     sim = MatchSimulator(model, classes, bat_df, bowl_df)
+    
+    # Pre-populate global player names
+    batters = balls_df.groupby("batter_id")["batter"].first().to_dict()
+    bowlers = balls_df.groupby("bowler_id")["bowler"].first().to_dict()
+    player_names.update(batters)
+    player_names.update(bowlers)
+    
     log.info("Data loaded successfully.")
 
 @app.get("/api/metadata")
@@ -111,6 +119,47 @@ class SimulateRequest(BaseModel):
     team2_bowlers: List[str]
     n_sims: Optional[int] = 100
 
+def generate_scorecard(innings_log: List[dict], p_names: dict) -> dict:
+    batting = {}
+    bowling = {}
+    for b in innings_log:
+        bat = b["batter"]
+        bowl = b["bowler"]
+        out = b["outcome"]
+        
+        if bat not in batting:
+            batting[bat] = {"name": p_names.get(bat, bat), "runs": 0, "balls": 0, "fours": 0, "sixes": 0, "out": False}
+        if bowl not in bowling:
+            bowling[bowl] = {"name": p_names.get(bowl, bowl), "overs": "", "balls": 0, "runs": 0, "wickets": 0}
+            
+        is_legal = out not in ["Wd", "Nb"]
+        
+        if out not in ["Wd"]:
+            batting[bat]["balls"] += 1
+            
+        if out == "W":
+            batting[bat]["out"] = True
+            if is_legal:
+                bowling[bowl]["balls"] += 1
+                bowling[bowl]["wickets"] += 1
+        elif out in ["Wd", "Nb"]:
+            bowling[bowl]["runs"] += 1
+        else:
+            runs = int(out)
+            batting[bat]["runs"] += runs
+            bowling[bowl]["runs"] += runs
+            if runs == 4:
+                batting[bat]["fours"] += 1
+            if runs == 6:
+                batting[bat]["sixes"] += 1
+            if is_legal:
+                bowling[bowl]["balls"] += 1
+
+    for b_id, stats in bowling.items():
+        stats["overs"] = f"{stats['balls'] // 6}.{stats['balls'] % 6}"
+        
+    return {"batting": list(batting.values()), "bowling": list(bowling.values())}
+
 @app.post("/api/simulate")
 def simulate_match(req: SimulateRequest):
     t1_wins = 0
@@ -144,7 +193,9 @@ def simulate_match(req: SimulateRequest):
                 "inn2_runs": inn2["runs"],
                 "inn2_wickets": inn2["wickets"],
                 "inn2_overs": inn2["overs"],
-                "inn2_balls": inn2["balls"]
+                "inn2_balls": inn2["balls"],
+                "inn1_scorecard": generate_scorecard(inn1["log"], player_names),
+                "inn2_scorecard": generate_scorecard(inn2["log"], player_names),
             }
 
     return {

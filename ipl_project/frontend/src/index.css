@@ -275,3 +275,43 @@ button:disabled {
   height: 1px;
   background: linear-gradient(to right, rgba(255,255,255,0.1), transparent);
 }
+
+.scorecard-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.scorecard-table th {
+  color: #a5b4fc;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  padding: 0.5rem 0.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  text-align: center;
+}
+
+.scorecard-table td {
+  padding: 0.75rem 0.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  text-align: center;
+}
+
+.scorecard-table tr.not-out td {
+  color: #4facfe;
+}
+
+.scorecard-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.innings-card h4 {
+  margin-top: 0;
+  color: #00f2fe;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 0.5rem;
+}
